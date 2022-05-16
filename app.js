@@ -56,102 +56,56 @@ function getAuthToken (username) {
 
 // 以下APIで利用するDBの操作メソッド
 // ユーザの検索
-function getUser (username, callback) {
-  const sql = "SELECT * FROM users WHERE username = ?"
-	con.query(sql, username ,function (err, user) {  
-    if (err || user.length === 0){ 
-      return callback(null)
-    }else{
-      return callback(user)
-    } 
-	});
-}
-
-// ユーザの新規追加
-function addUser (username, passwd, callback) {
-  const hash = getHash(passwd)
-  const token = getAuthToken(username)
-  const sql1 = "INSERT INTO users(username, hash, token) VALUES(?,?,?)"
-	con.query(sql1, [username, hash, token] ,function (err) {  
-    if (err) return callback(null)
-    //user Id取得
-    const sql2 = "SELECT id FROM users WHERE username = ?";
-    con.query(sql2,username,function (err, result) {
-      const id = result[0].id;
-      return callback(token, id)
-    })
-	});
-}
-
-// ログインの試行
-function login (username, passwd, callback) {
-  const hash = getHash(passwd)
-  const token = getAuthToken(username)
-  // ユーザ情報を取得
-  getUser(username, (user) => {
-    if(!user){
-      return callback(new Error('存在しないユーザーです'), null)     
-    }
-    const userresult= Object.values(JSON.parse(JSON.stringify(user)));
-    if (userresult[0].hash !== hash) {
-      return callback(new Error('パスワードが誤っています。'), null)
-    }
-    // 認証トークンを更新
-    userresult[0].token = token
-    updateUser(userresult, (err) => {
-      if (err) return callback(new Error('サーバーエラー'), null)
-      //user Id取得
-      const sql = "SELECT id FROM users WHERE username = ?";
-      con.query(sql,username,function (err, result) {
-        if (err) return callback(new Error('サーバーエラー'), null)
-        const id = result[0].id;
-        return callback(null, token, id)
-      })
-    })
+function getUser (username) {
+  return new Promise((resolve,reject)=>{
+    const sql = "SELECT * FROM users WHERE username = ?"
+    con.query(sql, username ,function (err, user) {  
+      if (err || user.length === 0){ 
+        reject(new Error('存在しないユーザーです'))
+      }else{
+        resolve(user)
+      } 
+    });
   })
 }
 
 // 認証トークンの確認
-function checkToken (username, token, callback) {
-  // ユーザ情報を取得
-  getUser(username, (user) => {
-    if(!user){
-      return callback(new Error('存在しないユーザーです'), null)     
-    }
+async function checkToken (username, token) {
+  try{
+    // ユーザ情報を取得
+    const user = await getUser(username)
+    if(!user) throw new Error('存在しないユーザーです')
     const userresult= Object.values(JSON.parse(JSON.stringify(user)));
-    if (userresult[0].token !== token) {
-      return callback(new Error('認証に失敗'), null)
-    }
-    return callback(null, userresult[0])
+    if (userresult[0].token !== token) throw new Error('認証に失敗')
+    return userresult[0]
+  }catch(e){
+    throw new Error(e.message)
+  }
+}
+
+//DBの死活確認
+function checkConnection () {
+  const sql = "SELECT * FROM users LIMIT 1";
+  return new Promise((resolve,reject)=>{
+    con.query(sql,function (err) {
+      if(!err){
+        resolve()
+      }else{
+        if (err.code === 'PROTOCOL_CONNECTION_LOST') {
+          conConnect(()=>{
+            console.log('connected db')
+            reject()
+          })
+        } else {
+          console.log('db error')
+          reject()
+        }
+      }
+    })
   })
 }
 
-// ユーザ情報を更新
-function updateUser (userresult, callback) {
-  const sql = "UPDATE users SET token = ? WHERE username = ?";
-	con.query(sql,[userresult[0].token, userresult[0].username],function (err, result) {
-	if (err) throw callback(err, null);
-	return callback(null);
-	});
-}
-
-function checkConnection () {
-  const sql = "SELECT * FROM users LIMIT 1";
-	con.query(sql,function (err, result) {
-    if(!err)return;
-    if (err.code === 'PROTOCOL_CONNECTION_LOST') {
-      conConnect(()=>{
-        console.log('connected db')
-        return;
-      });
-    } else {
-      console.log('db error')
-      return
-    }
-	});
-}
-
-//⑥で使用
+//「⑦曲データCSV読み込みapi」で使用
 function AddSong(Insongname, Indifficulty, callback){
   const songname = Insongname.replace(/[\"]/g,"")
   const difficulty = Indifficulty.replace(/[\"]/g,"")
@@ -189,136 +143,277 @@ function AddSong(Insongname, Indifficulty, callback){
 //    API定義
 //-----------------------------------------------
 /* ①ログイン認証api */
-app.get('/login', (req, res, next) => {
-  const username = req.query.username
-  const passwd = req.query.passwd
-  login(username, passwd, (err, token, userId) => {
-    if (err) return next(new Error(err.message));
-    // ログイン成功したらトークンを返す
+app.get('/login', async (req, res, next) => {
+  try{
+    const username = req.query.username
+    const passwd = req.query.passwd
+    const hash = getHash(passwd)
+    const token = getAuthToken(username)
+
+    // ユーザ情報を取得
+    const user = await getUser(username)
+    if(!user) throw new Error('存在しないユーザーです')  
+    const userObj= Object.values(JSON.parse(JSON.stringify(user)));
+    if (userObj[0].hash !== hash) throw new Error('パスワードが誤っています。')
+
+    // 認証トークンを更新
+    userObj[0].token = token
+    await ((user)=>{
+      return new Promise((resolve,reject)=>{
+        const sql = "UPDATE users SET token = ? WHERE username = ?";
+        con.query(sql,[user.token, user.username],(err)=>{
+          if (!err){
+            resolve()
+          }else{
+            reject(new Error('存在しないユーザーです'))
+          }
+       })
+      });
+    })(userObj[0])
+
+    // user Id取得
+    const userId = userObj[0].id
+
+    // ログイン成功したらトークンとユーザーIDを返す
     res.status(202).json({token, userId})
-  })
+
+  }catch(e){
+    next(new Error(e.message))
+  }
 })
 
 // ②ユーザ追加API(曲を削除しないよう運用する必要あり)
-app.get('/adduser', (req, res, next) => {
-  const username = req.query.username
-  const passwd = req.query.passwd
-  if (username ==='' || passwd ==='')return next(new Error('パラメータが空です'));
-  // 既存ユーザのチェック
-  getUser(username, (user) => {
-    if (user) return next(new Error('既に登録済みのユーザidです'));
+app.get('/adduser', async (req, res, next) => {
+  try{
+    const username = req.query.username
+    const passwd = req.query.passwd
+    const hash = getHash(passwd)
+    const token = getAuthToken(username)
+
+    if (username ==='' || passwd ==='')throw new Error('パラメータが空です');
+
+    // 既存ユーザのチェック
+    const user1 = await ((username)=>{
+      return new Promise((resolve,reject)=>{
+        const sql = "SELECT * FROM users WHERE username = ?"
+        con.query(sql, username ,function (err, user) {  
+          if (err){ 
+            reject(new Error('存在しないユーザーです'))
+          }else{
+            resolve(user)
+          } 
+        });
+      })
+    })(username)
+    if (user1.length != 0) throw new Error('既に登録済みのユーザidです');
+    
     // 新規追加
-    addUser(username, passwd, (token, userId) => {
-      if (!token) return next(new Error('DBエラー(ユーザ作成時エラー)'));
-      //曲数取得
-      const sql = "INSERT INTO usersongs(songId,userId,clearLamp) SELECT songs.id, ?, 7 FROM songs "
-      con.query(sql ,userId ,function(err, result) {
-        if (err) return next(new Error('DBエラー'));
-        return res.status(201).json({token, userId})
-      });   
-    })
-  })
+    const userId = await ((username)=>{
+      return new Promise((resolve,reject)=>{
+        const sql1 = "INSERT INTO users(username, hash, token) VALUES(?,?,?)"
+        con.query(sql1, [username, hash, token] ,function (err,result) {  
+          if(err){
+            reject(new Error('DBエラー(ユーザ作成時エラー)'))
+          }else{
+            resolve(result.insertId)
+          }
+        })
+      })
+    })(username)
+
+    //初期曲データを登録
+    await ((userId)=>{
+      return new Promise((resolve,reject)=>{
+        const sql = "INSERT INTO usersongs(songId,userId,clearLamp) SELECT songs.id, ?, 7 FROM songs "
+        con.query(sql ,userId ,(err)=>{
+          if (err){
+            reject(new Error('DBエラー(初期曲データ登録時エラー)'))
+          }else{
+            resolve()
+          }
+        })
+      })
+    })(userId)
+
+    // ログイン成功したらトークンとユーザーIDを返す
+    res.status(201).json({token, userId})
+
+  }catch(e){
+    next(new Error(e.message))
+  }
 })
 
 /* ③ユーザー毎の曲情報取得api */
-app.post('/getSongByUser',(req, res, next) => {
-  checkConnection();
-  console.log('server ok');
-  const sql = "SELECT songs.name AS songName, usersongs.clearLamp AS clearLamp, color.colorCode AS color, songs.id AS songId, songs.difficulty AS difficulty FROM usersongs INNER JOIN users ON usersongs.userId = users.id INNER JOIN color ON usersongs.clearLamp = color.id INNER JOIN songs ON usersongs.songId = songs.id WHERE users.username = ? ORDER BY songName";
-	con.query(sql,req.body.username,function (err, result, fields) {
-	if (err) return next(new Error('曲情報の取得に失敗しました'));
-  res.json(result);
-	});
-})
+app.post('/getSongByUser',async (req, res, next) => {
+  try{
+    const username = req.body.username;
 
-/* ④ユーザー毎のランプ保存用api */
-app.post('/SaveClearlampByUser1/', (req, res, next) => {
-  checkConnection();
-  const clearLamp = req.body.clearLamp;
-  const userId = req.body.userId;
-  const songId = req.body.songId;
-	const sql = "UPDATE usersongs SET clearLamp = ? WHERE userId = ? AND songId = ?";
-	con.query(sql,[clearLamp, userId, songId],function (err, result, fields) {
-	if (err) return next(new Error('クリアランプの更新に失敗しました'));
-	res.json(result);
-	});
-})
+    //DB死活確認
+    await checkConnection();
 
-/* ④ユーザー毎のランプ保存用api */
-app.post('/SaveClearlampByUser/', (req, res, next) => {
-  checkConnection();
-  const clearLamp = req.body.clearLamp;
-  const userId = req.body.userId;
-  const songId = req.body.songId;
-  const token = req.body.token;
-  const username = req.body.username;
-  checkToken(username, token, (err, user) =>{
-    if(err) return next(new Error('ログインしてください'));
-    const sql = "UPDATE usersongs SET clearLamp = ? WHERE userId = ? AND songId = ?";
-    con.query(sql,[clearLamp, userId, songId],function (err, result, fields) {
-    if (err) return next(new Error('クリアランプの更新に失敗しました'));
+    //ユーザーに紐づく曲情報の取得
+    const result = await ((username)=>{
+      return new Promise((resolve,reject)=>{
+        const sql = "SELECT songs.name AS songName, usersongs.clearLamp AS clearLamp, color.colorCode AS color, songs.id AS songId, songs.difficulty AS difficulty FROM usersongs INNER JOIN users ON usersongs.userId = users.id INNER JOIN color ON usersongs.clearLamp = color.id INNER JOIN songs ON usersongs.songId = songs.id WHERE users.username = ? ORDER BY songName";
+        con.query(sql,username,function (err, result) {
+          if (err){
+            reject(new Error('曲情報の取得に失敗しました'))
+          }else{
+            resolve(result)
+          }
+        })
+      })
+    })(username);
+
+    // ログイン成功したら曲情報を返す
     res.json(result);
-    });
-  })
+
+  }catch(e){
+    next(new Error(e.message))
+  }
+})
+
+/* ④ユーザー毎のランプ保存用api */
+app.post('/SaveClearlampByUser/', async (req, res, next) => {
+  try{
+    const clearLamp = req.body.clearLamp;
+    const userId = req.body.userId;
+    const songId = req.body.songId;
+    const token = req.body.token;
+    const username = req.body.username;
+
+    //DB死活確認
+    await checkConnection();
+
+    //トークンの確認
+    const user = await checkToken(username, token)
+    if(!user) throw new Error('ログインしてください');
+
+    //クリアランプを保存
+    const result = await ((clearLamp, userId, songId)=>{
+      return new Promise((resolve,reject)=>{
+        const sql = "UPDATE usersongs SET clearLamp = ? WHERE userId = ? AND songId = ?";
+        con.query(sql,[clearLamp, userId, songId],function (err, result) {
+              if (err){
+            reject(new Error('クリアランプの更新に失敗しました'))
+          }else{
+            resolve(result)
+          }
+        })
+      })
+    })(clearLamp, userId, songId);
+
+    res.json(result);
+
+  }catch(e){
+    next(new Error(e.message))
+  }
 })
 
 /* ⑤ユーザー削除用api */
-app.post('/DeleteUser/',(req, res, next)=>{
-  checkConnection();
-  const token = req.body.token;
-  const username = req.body.username;
-  const userId = req.body.userId
-  console.log(token, username, userId)
-	const sql1 = "DELETE FROM usersongs WHERE userId = ? ";
-  const sql2 = "DELETE FROM users WHERE id = ? ";
-  checkToken(username, token, (err, user) =>{
-    if(err) return next(new Error('ログインしてください'));
-    con.query(sql1 ,userId ,function (err) {
-      if (err) return next(new Error('DBエラー'));
-      con.query(sql2 ,userId ,function (err, result) {
-        if (err) return next(new Error('DBエラー'));
-        res.json(result);
-      });
-    });
-  })
+app.post('/DeleteUser/',async (req, res, next)=>{
+  try{
+    const token = req.body.token;
+    const username = req.body.username;
+    const userId = req.body.userId
+
+    //DB死活確認
+    await checkConnection();
+
+    //トークンの確認
+    const user = await checkToken(username, token)
+    if(!user) throw new Error('ログインしてください');
+
+    //ユーザーに紐づく曲データ、及びユーザー情報を削除
+    const result = await ((userId)=>{
+      return new Promise((resolve,reject)=>{
+        con.beginTransaction(function(err) {
+          const sql1 = "DELETE FROM usersongs WHERE userId = ? ";
+          const sql2 = "DELETE FROM users WHERE id = ? ";
+          if (err) reject(new Error('DBエラー'));
+          con.query(sql1 ,userId ,function (err) {
+            if (err) {
+              return con.rollback(function() {
+                reject(new Error('DBエラー'));
+              });
+            };
+            con.query(sql2 ,userId ,function (err, result) {
+              if (err){ 
+                return con.rollback(function() {
+                  reject(new Error('DBエラー'));
+                });
+              }
+              con.commit(function(err) {
+                if (err) {
+                  return con.rollback(function() {
+                    reject(new Error('DBエラー'));
+                  });
+                }
+                resolve(result)
+              });
+            });
+          });
+        });
+      })
+    })(userId);
+
+    res.json(result);
+
+  }catch(e){
+    next(new Error(e.message))
+  }
 })
 
 /* ⑥曲追加用api */
-app.post('/AddSong/',(req, res, next)=>{
-  checkConnection();
-  const songname = req.body.songname;
-  const difficulty = req.body.difficulty;
-	const sql1 = "INSERT INTO songs(name,difficulty) VALUES (? ,?) ";
-  const sql2 = "INSERT INTO usersongs(songId,userId,clearLamp) SELECT ? ,users.id, 7 FROM users "
-  con.beginTransaction(function(err) {
-    if (err) return next(new Error('DBエラー'));
-    con.query(sql1 ,[songname ,difficulty] ,function (err, result1) {
-      if (err) {
-        return con.rollback(function() {
-          return next(new Error('DBエラー'));
-        });
-      };
-      const songid = result1.insertId;
-      con.query(sql2 ,songid ,function(err, result2) {
-        if (err){ 
-          return con.rollback(function() {
-            return next(new Error('DBエラー'));
-          });
-        }
-        con.commit(function(err) {
-          if (err) {
-            return con.rollback(function() {
-              return next(new Error('DBエラー'));
+app.post('/AddSong/',async (req, res, next)=>{
+  try{
+    const songname = req.body.songname;
+    const difficulty = req.body.difficulty;
+
+    await checkConnection();
+
+    const result2 = await ((songname,difficulty)=>{
+      return new Promise((resolve,reject)=>{
+        con.beginTransaction(function(err) {
+          const sql1 = "INSERT INTO songs(name,difficulty) VALUES (? ,?) ";
+          const sql2 = "INSERT INTO usersongs(songId,userId,clearLamp) SELECT ? ,users.id, 7 FROM users "
+          if (err) reject(new Error('DBエラー'));
+          con.query(sql1 ,[songname ,difficulty] ,function (err, result1) {
+            if (err) {
+              return con.rollback(function() {
+                reject(new Error('DBエラー'));
+              });
+            };
+            const songid = result1.insertId;
+            con.query(sql2 ,songid ,function(err, result2) {
+              if (err){ 
+                return con.rollback(function() {
+                  reject(new Error('DBエラー'));
+                });
+              }
+              con.commit(function(err) {
+                if (err) {
+                  return con.rollback(function() {
+                    reject(new Error('DBエラー'));
+                  });
+                }
+                resolve(result2)
+              });
             });
-          }
-        res.json(result2);
+          });
         });
-      });
-    });
-  });
+      })
+    })(songname,difficulty);
+
+    res.json(result2);
+    
+  }catch(e){
+    next(new Error(e.message))
+  }
 });
 
-/* ⑥曲データCSV読み込みapi(test) */
+
+/* ⑦曲データCSV読み込みapi(test) */
 /*app.get('/CsvUpload', (req, res, next) => {
   checkConnection();
   fs.createReadStream(__dirname + '/public/splv12_score.csv')
