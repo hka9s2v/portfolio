@@ -106,33 +106,35 @@ function checkConnection () {
 }
 
 //「⑦曲データCSV読み込みapi」で使用
-function AddSong(Insongname, Indifficulty, callback){
+function AddSong(Insongname, Indifficulty){
   const songname = Insongname.replace(/[\"]/g,"")
   const difficulty = Indifficulty.replace(/[\"]/g,"")
-  console.log(songname.replace(/[\"]/g,""),difficulty.replace(/[\"]/g,""))
 	const sql1 = "INSERT INTO songs(name,difficulty) VALUES (? ,?) ";
   const sql2 = "INSERT INTO usersongs(songId,userId,clearLamp) SELECT ? ,users.id, 7 FROM users "
-  con.beginTransaction(function(err) {
-    if (err) return callback(new Error('DBエラー'))
-    con.query(sql1 ,[songname ,difficulty] ,function (err, result1) {
-      if (err) {
-        return con.rollback(function() {
-          return callback(new Error('DBエラー'))
-        });
-      };
-      const songid = result1.insertId;
-      con.query(sql2 ,songid ,function(err, result2) {
-        if (err){ 
+  return new Promise((resolve,reject)=>{
+    con.beginTransaction(function(err) {
+      if (err) reject(new Error('DBエラー'));
+      con.query(sql1 ,[songname ,difficulty] ,function (err, result1) {
+        if (err) {
           return con.rollback(function() {
-            return callback(new Error('DBエラー'))
+            reject(new Error('DBエラー'));
           });
-        }
-        con.commit(function(err) {
-          if (err) {
+        };
+        const songid = result1.insertId;
+        con.query(sql2 ,songid ,function(err, result2) {
+          if (err){ 
             return con.rollback(function() {
-              return callback(new Error('DBエラー'))
+              reject(new Error('DBエラー'));
             });
-          }
+          };
+          con.commit(function(err) {
+            if (err) {
+              return con.rollback(function() {
+                reject(new Error('DBエラー'));
+              });
+            }
+            resolve();
+          });
         });
       });
     });
@@ -370,8 +372,10 @@ app.post('/AddSong/',async (req, res, next)=>{
     const songname = req.body.songname;
     const difficulty = req.body.difficulty;
 
+    //DB死活確認
     await checkConnection();
 
+    //曲データをDBに追加
     const result2 = await ((songname,difficulty)=>{
       return new Promise((resolve,reject)=>{
         con.beginTransaction(function(err) {
@@ -414,18 +418,25 @@ app.post('/AddSong/',async (req, res, next)=>{
 
 
 /* ⑦曲データCSV読み込みapi(test) */
-/*app.get('/CsvUpload', (req, res, next) => {
-  checkConnection();
-  fs.createReadStream(__dirname + '/public/splv12_score.csv')
-  .pipe(csv.parse({columns: true}, function(err, data) {
-    console.log(data.length)
-    for(let i = 0; i < data.length ; i++){
-      /*AddSong(JSON.stringify(data[i].name),JSON.stringify(data[i].difficulty),next,(err)=>{
-        if (err) return next(new Error(err.message));
-      })
-    }
-  }));
-})*/
+/*
+app.get('/CsvUpload', async (req, res, next) => {
+  try{
+
+    //DB死活確認
+    await checkConnection();
+
+    //CSVファイル読み込んで曲データをDBに追加
+    fs.createReadStream(__dirname + '/public/splv12_score.csv')
+    .pipe(csv.parse({columns: true}, function(err, data) {
+      for(let i = 0; i < data.length ; i++){
+        await AddSong(JSON.stringify(data[i].name),JSON.stringify(data[i].difficulty))
+      }
+    }));
+  }catch(e){
+    next(new Error(e.message))
+  }
+})
+*/
 
 //-----------------------------------------------
 //    ミドルウェア関数のロード
